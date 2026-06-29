@@ -211,7 +211,7 @@ jobs:
 
       - name: Trivy Vulnerability Scan
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
           ignore-unfixed: true
