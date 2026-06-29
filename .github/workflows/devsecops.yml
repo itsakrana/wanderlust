@@ -1,0 +1,329 @@
+name: Secure CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+  pull_request:
+    branches:
+      - main
+      - develop
+
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+env:
+  NODE_VERSION: "20"
+  REPORT_DIR: reports
+
+jobs:
+
+  security:
+
+    name: Security Scan
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+
+      ####################################################
+      # Checkout
+      ####################################################
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      ####################################################
+      # Setup Node
+      ####################################################
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      ####################################################
+      # Create Report Directory
+      ####################################################
+
+      - name: Create Report Folder
+        run: |
+          mkdir -p $REPORT_DIR
+
+      ####################################################
+      # Install Dependencies
+      ####################################################
+
+      - name: Install Project Dependencies
+        run: |
+
+          if [ -f package-lock.json ]; then
+
+              npm ci
+
+          elif [ -f package.json ]; then
+
+              npm install
+
+          else
+
+              echo "No package.json found"
+
+          fi
+
+      ####################################################
+      # Display Versions
+      ####################################################
+
+      - name: Environment Information
+        run: |
+
+          echo "Node Version"
+
+          node -v
+
+          echo ""
+
+          echo "NPM Version"
+
+          npm -v
+
+      ####################################################
+      # Prettier Check
+      ####################################################
+
+      - name: Check Formatting
+        continue-on-error: true
+        run: |
+
+          if [ -f package.json ]; then
+
+            npx prettier . --check \
+            > $REPORT_DIR/prettier.txt || true
+
+          fi
+
+      ####################################################
+      # ESLint
+      ####################################################
+
+      - name: Run ESLint
+        continue-on-error: true
+        run: |
+
+          if [ -f package.json ]; then
+
+            npx eslint . \
+            -f json \
+            -o $REPORT_DIR/eslint.json || true
+
+          fi
+
+      ####################################################
+      # Unit Tests
+      ####################################################
+
+      - name: Run Tests
+        continue-on-error: true
+        run: |
+
+          if npm run | grep test; then
+
+             npm test \
+             > $REPORT_DIR/test-report.txt || true
+
+          fi
+
+      ####################################################
+      # npm Audit
+      ####################################################
+
+      - name: Dependency Audit
+        continue-on-error: true
+        run: |
+
+          npm audit \
+          --audit-level=low \
+          --json \
+          > $REPORT_DIR/npm-audit.json || true
+
+      ####################################################
+      # Install jq
+      ####################################################
+
+      - name: Install jq
+        run: |
+
+          sudo apt-get update
+
+          sudo apt-get install -y jq
+
+      ####################################################
+      # Starting Security Banner
+      ####################################################
+
+      - name: Security Banner
+        run: |
+
+          echo "Starting Enterprise Security Scan..."
+
+            ####################################################
+      # Gitleaks
+      ####################################################
+
+      - name: Secret Scan (Gitleaks)
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      ####################################################
+      # Semgrep
+      ####################################################
+
+      - name: SAST Scan (Semgrep)
+        continue-on-error: true
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/security-audit
+
+      ####################################################
+      # Trivy File System Scan
+      ####################################################
+
+      - name: Trivy Vulnerability Scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH,MEDIUM
+          format: table
+          output: reports/trivy-report.txt
+
+      ####################################################
+      # Generate Markdown Report
+      ####################################################
+
+      - name: Generate Security Report
+        run: |
+
+          chmod +x scripts/generate-report.sh
+
+          ./scripts/generate-report.sh
+
+      ####################################################
+      # GitHub Job Summary
+      ####################################################
+
+      - name: Publish Summary
+        run: |
+
+          chmod +x scripts/github-summary.sh
+
+          ./scripts/github-summary.sh
+
+      ####################################################
+      # Upload Reports
+      ####################################################
+
+      - name: Upload Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: devsecops-report
+          path: reports/
+
+      ####################################################
+      # Upload ESLint
+      ####################################################
+
+      - name: Upload ESLint
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eslint-report
+          path: reports/eslint.json
+
+      ####################################################
+      # Upload npm Audit
+      ####################################################
+
+      - name: Upload npm Audit
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit
+          path: reports/npm-audit.json
+
+      ####################################################
+      # Upload Trivy
+      ####################################################
+
+      - name: Upload Trivy Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-report
+          path: reports/trivy-report.txt
+
+      ####################################################
+      # Build Result
+      ####################################################
+
+      - name: Validate Reports
+        run: |
+
+          FAIL=0
+
+          if grep -q "CRITICAL" reports/security-report.md; then
+             echo "Critical vulnerability found"
+             FAIL=1
+          fi
+
+          if grep -q "HIGH" reports/security-report.md; then
+             echo "High severity vulnerability found"
+             FAIL=1
+          fi
+
+          exit $FAIL
+
+      ####################################################
+      # Pipeline Finished
+      ####################################################
+
+      - name: Finished
+        if: always()
+        run: |
+
+          echo ""
+
+          echo "========================================="
+
+          echo " DevSecOps Pipeline Completed"
+
+          echo "========================================="
+
+          echo ""
+
+          echo "Reports generated under reports/"
+
+          ls -la reports
+      
